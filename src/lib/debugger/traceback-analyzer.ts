@@ -29,8 +29,8 @@ export function analyzeTraceback(stderr: string, sourceCode: string): DebugAnaly
   let lineNumber: number | null = null;
   let codeSnippet: string | null = null;
 
-  // Search for line number pattern: File "solution.py", line X
-  const lineRegex = /File ".*?solution\.py", line (\d+)(?:, in (.+))?/i;
+  // Search for line number pattern: File "solution.py", line X or File "<exec>", line X
+  const lineRegex = /File "(?:.*?solution\.py|<exec>|<string>)", line (\d+)(?:, in (.+))?/i;
   const match = stderr.match(lineRegex);
   if (match && match[1]) {
     lineNumber = parseInt(match[1], 10);
