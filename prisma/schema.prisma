@@ -1,0 +1,124 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String            @id @default(cuid())
+  name         String
+  email        String            @unique
+  passwordHash String
+  role         String            @default("STUDENT") // STUDENT or ADMIN
+  createdAt    DateTime          @default(now())
+  submissions  Submission[]
+  problemProg  ProblemProgress[]
+  levelProg    LevelProgress[]
+}
+
+model Level {
+  id          String               @id @default(cuid())
+  number      Int                  @unique
+  title       String
+  description String
+  objective   String
+  unlockRule  String               @default("ALL_ACCEPTED")
+  isMilestone Boolean              @default(false)
+  problems    Problem[]
+  progress    LevelProgress[]
+  assignment  MilestoneAssignment?
+}
+
+model Problem {
+  id           String            @id // e.g. "PY-L01-P01"
+  levelId      String
+  level        Level             @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  orderIndex   Int               @default(1)
+  title        String
+  difficulty   String            @default("Small") // Small or Medium
+  concept      String
+  objective    String
+  statement    String
+  inputFormat  String
+  outputFormat String
+  constraints  String
+  starterCode  String?
+  solutionDoc  String?
+  timeLimitMs  Int               @default(4000)
+  memoryLimitMb Int              @default(128)
+  testCases    TestCase[]
+  hints        Hint[]
+  submissions  Submission[]
+  progress     ProblemProgress[]
+}
+
+model TestCase {
+  id             String   @id @default(cuid())
+  problemId      String
+  problem        Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  type           String   @default("VISIBLE") // VISIBLE or HIDDEN
+  inputData      String
+  expectedOutput String
+  weight         Int      @default(1)
+  isActive       Boolean  @default(true)
+}
+
+model Hint {
+  id        String  @id @default(cuid())
+  problemId String
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  sequence  Int     @default(1)
+  content   String
+}
+
+model MilestoneAssignment {
+  id           String @id @default(cuid())
+  levelId      String @unique
+  level        Level  @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  title        String
+  instructions String
+  passRule     String @default("100% Tests Required")
+}
+
+model Submission {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problemId    String
+  problem      Problem  @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  code         String
+  status       String   // ACCEPTED, WRONG_ANSWER, RUNTIME_ERROR, TIME_LIMIT, MEMORY_LIMIT, SYSTEM_ERROR
+  passedCount  Int      @default(0)
+  totalCount   Int      @default(0)
+  executionMs  Int      @default(0)
+  errorMessage String?
+  createdAt    DateTime @default(now())
+}
+
+model ProblemProgress {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problemId   String
+  problem     Problem   @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  status      String    @default("ATTEMPTED") // ATTEMPTED, ACCEPTED
+  attempts    Int       @default(1)
+  completedAt DateTime?
+
+  @@unique([userId, problemId])
+}
+
+model LevelProgress {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  levelId     String
+  level       Level     @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  status      String    @default("LOCKED") // LOCKED, UNLOCKED, COMPLETED
+  completedAt DateTime?
+
+  @@unique([userId, levelId])
+}
