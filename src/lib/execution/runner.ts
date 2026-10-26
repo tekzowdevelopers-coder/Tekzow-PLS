@@ -57,7 +57,7 @@ export async function executePython(
   const scriptPath = path.join(sandboxDir, "solution.py");
   await fs.writeFile(scriptPath, code, "utf-8");
 
-  const pythonCmd = process.env.PYTHON_PATH || "python";
+  const pythonCmd = process.env.PYTHON_PATH || (process.platform === "win32" ? "python" : "python3");
 
   const startTime = Date.now();
   let timedOut = false;
