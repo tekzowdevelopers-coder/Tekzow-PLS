@@ -3,9 +3,16 @@ import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { evaluateSubmission } from "@/lib/evaluation/evaluator";
 import { handleAcceptedSubmission } from "@/lib/progress/unlock-engine";
+import { setRunnerBaseUrl } from "@/lib/execution/runner";
 
 export async function POST(req: NextRequest) {
   try {
+    const host = req.headers.get("host");
+    if (host) {
+      const protocol = host.startsWith("localhost") || host.startsWith("127.0.0.1") ? "http" : "https";
+      setRunnerBaseUrl(`${protocol}://${host}`);
+    }
+
     const user = await getCurrentUser(req);
     if (!user) {
       return NextResponse.json({ error: "Authentication required. Please sign in to submit solutions." }, { status: 401 });

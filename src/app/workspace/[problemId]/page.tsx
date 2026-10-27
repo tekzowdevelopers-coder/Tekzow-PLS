@@ -26,6 +26,7 @@ import {
   Flame,
   Lock,
 } from "lucide-react";
+import { runClientPython, initClientPyodide } from "@/lib/execution/client-pyodide";
 
 export default function WorkspacePage() {
   const params = useParams();
@@ -97,13 +98,16 @@ export default function WorkspacePage() {
         console.error(err);
         setLoading(false);
       });
+
+    // Preload Python WebAssembly runtime in background
+    initClientPyodide().catch(() => {});
   }, [problemId]);
 
   // Run Code against sample or custom input
   const handleRunCode = async (useCustomInput: boolean = false) => {
     setIsExecuting(true);
     setActiveTab("console");
-    setStdout("Executing Python in isolated sandbox...");
+    setStdout("");
     setStderr("");
 
     const inputData = useCustomInput
@@ -111,6 +115,33 @@ export default function WorkspacePage() {
       : problem?.visibleTests?.[0]?.inputData || "";
 
     try {
+      // 1. Instant execution in user's browser via WebAssembly
+      try {
+        const clientRes = await runClientPython(code, inputData);
+        setStdout(clientRes.stdout || "");
+        setStderr(clientRes.stderr || "");
+        setExecutionMs(clientRes.executionMs);
+
+        if (clientRes.stderr) {
+          // Send to diagnostic analyzer for explanation & hints
+          fetch("/api/code/debug", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code, input: inputData }),
+          })
+            .then((r) => r.json())
+            .then((d) => {
+              if (d.debugAnalysis?.hasError) setDebugAnalysis(d.debugAnalysis);
+            })
+            .catch(() => {});
+        }
+        setIsExecuting(false);
+        return;
+      } catch (clientErr) {
+        console.warn("Client WebAssembly execution fallback to server:", clientErr);
+      }
+
+      // 2. Server execution fallback
       const res = await fetch("/api/code/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -137,15 +168,26 @@ export default function WorkspacePage() {
     setActiveTab("debug");
     try {
       const inputData = customInput || problem?.visibleTests?.[0]?.inputData || "";
+
+      // Instant client execution to show stdout/stderr immediately
+      try {
+        const clientRes = await runClientPython(code, inputData);
+        setStdout(clientRes.stdout || "");
+        setStderr(clientRes.stderr || "");
+        setExecutionMs(clientRes.executionMs);
+      } catch (cErr) {
+        console.warn("Client debug fallback:", cErr);
+      }
+
       const res = await fetch("/api/code/debug", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code, input: inputData }),
       });
       const data = await res.json();
-      setStdout(data.stdout || "");
-      setStderr(data.stderr || "");
-      setExecutionMs(data.executionMs);
+      if (data.stdout && !stdout) setStdout(data.stdout || "");
+      if (data.stderr && !stderr) setStderr(data.stderr || "");
+      if (data.executionMs) setExecutionMs(data.executionMs);
       setDebugAnalysis(data.debugAnalysis);
     } catch (err: any) {
       setStderr(err.message || "Debug execution failed");

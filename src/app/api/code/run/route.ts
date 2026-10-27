@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { executePython } from "@/lib/execution/runner";
+import { executePython, setRunnerBaseUrl } from "@/lib/execution/runner";
 import { analyzeTraceback } from "@/lib/debugger/traceback-analyzer";
 
 export async function POST(req: NextRequest) {
   try {
+    const host = req.headers.get("host");
+    if (host) {
+      const protocol = host.startsWith("localhost") || host.startsWith("127.0.0.1") ? "http" : "https";
+      setRunnerBaseUrl(`${protocol}://${host}`);
+    }
+
     const { code, input = "" } = await req.json();
 
     if (code === undefined || code === null) {

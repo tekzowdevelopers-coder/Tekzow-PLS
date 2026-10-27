@@ -19,7 +19,7 @@ const FORBIDDEN_PATTERNS = [
   /__import__\s*\(\s*['"](os|subprocess|sys|shutil|socket|urllib|requests|http|ctypes)/i,
   /eval\s*\(/,
   /exec\s*\(/,
-  /open\s*\(\s*['"][^'"]*(\/|\\|\.\.)/i, // block opening external files / path traversal
+  /open\s*\(\s*['"][^'"]*(\/|\\|\.\.)/i,
 ];
 
 export function checkCodeSafety(code: string): string | null {
@@ -31,106 +31,56 @@ export function checkCodeSafety(code: string): string | null {
   return null;
 }
 
-// Pyodide singleton caching for ultra-fast in-memory executions
-let pyodideInstance: any = null;
-let pyodideInitPromise: Promise<any> | null = null;
+let defaultBaseUrl = "";
 
-async function getPyodide(): Promise<any> {
-  if (pyodideInstance) return pyodideInstance;
-  if (!pyodideInitPromise) {
-    pyodideInitPromise = (async () => {
-      const { loadPyodide } = await import("pyodide");
-      const py = await loadPyodide();
-      pyodideInstance = py;
-      return py;
-    })();
-  }
-  return pyodideInitPromise;
+export function setRunnerBaseUrl(url: string) {
+  defaultBaseUrl = url;
 }
 
-function cleanPyodideStderr(raw: string): string {
-  const execIdx = raw.indexOf('File "<exec>"');
-  if (execIdx !== -1) {
-    const studentPart = raw.substring(execIdx).replace(/File "<exec>"/g, 'File "solution.py"');
-    return `Traceback (most recent call last):\n  ${studentPart}`;
-  }
-  return raw
-    .replace(/File "\/lib\/python3\d+\.zip\/_pyodide\/_base\.py", line \d+, in .*\n/g, "")
-    .replace(/File "<exec>"/g, 'File "solution.py"');
-}
-
-export async function executeWithPyodide(
+// Execute via Vercel native Python serverless function (/api/py_exec)
+async function executeViaVercelPython(
   code: string,
   inputData: string = "",
   timeoutMs: number = 4000
-): Promise<ExecutionResult> {
-  const startTime = Date.now();
-  let stdoutData = "";
-  let stderrData = "";
-  let timedOut = false;
-  let exitCode = 0;
-
+): Promise<ExecutionResult | null> {
   try {
-    const py = await getPyodide();
-
-    py.setStdout({
-      batched: (msg: string) => {
-        stdoutData += msg + "\n";
-      },
-    });
-
-    py.setStderr({
-      batched: (msg: string) => {
-        stderrData += msg + "\n";
-      },
-    });
-
-    const inputLines = inputData ? inputData.split(/\r?\n/) : [];
-    let inputIdx = 0;
-    py.setStdin({
-      stdin: () => {
-        if (inputIdx < inputLines.length) {
-          return inputLines[inputIdx++] + "\n";
-        }
-        return "";
-      },
-      isatty: false,
-    });
-
-    const isolatedGlobals = py.toPy({});
-
-    let timer: NodeJS.Timeout;
-    const executionPromise = py.runPythonAsync(code, { globals: isolatedGlobals });
-    const timeoutPromise = new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        timedOut = true;
-        reject(new Error("Execution timed out"));
-      }, timeoutMs);
-    });
-
-    await Promise.race([executionPromise, timeoutPromise]).finally(() => {
-      clearTimeout(timer);
-    });
-
-    exitCode = 0;
-  } catch (err: any) {
-    if (timedOut) {
-      exitCode = 124;
-      stderrData = `Time Limit Exceeded: Execution took longer than ${timeoutMs}ms. Check for infinite loops or unbounded inputs.`;
-    } else {
-      exitCode = 1;
-      const rawError = err?.message || String(err);
-      stderrData = cleanPyodideStderr(rawError);
+    let baseUrl = defaultBaseUrl;
+    if (!baseUrl) {
+      const host = process.env.VERCEL_URL || process.env.NEXT_PUBLIC_VERCEL_URL;
+      if (host) {
+        const protocol = host.startsWith("localhost") || host.startsWith("127.0.0.1") ? "http" : "https";
+        baseUrl = `${protocol}://${host}`;
+      }
     }
-  }
+    if (!baseUrl) return null;
+    const url = `${baseUrl}/api/py_exec`;
 
-  return {
-    stdout: stdoutData,
-    stderr: stderrData,
-    exitCode: timedOut ? null : exitCode,
-    executionMs: Date.now() - startTime,
-    timedOut,
-  };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs + 1000);
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, input: inputData, timeout: timeoutMs / 1000 }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        stdout: data.stdout || "",
+        stderr: data.stderr || "",
+        exitCode: data.exitCode ?? 0,
+        executionMs: data.executionMs || 10,
+        timedOut: !!data.timedOut,
+        securityViolation: data.securityViolation,
+      };
+    }
+  } catch (err) {
+    console.warn("Vercel python runner fetch notice:", err);
+  }
+  return null;
 }
 
 export async function executePython(
@@ -151,13 +101,15 @@ export async function executePython(
     };
   }
 
-  // If running in Vercel environment, standard Node lambda does not include a python3 binary.
-  // Execute via Pyodide WASM directly for instant, secure execution without external process dependencies.
-  if (process.env.VERCEL) {
-    return executeWithPyodide(code, inputData, timeoutMs);
+  // 2. If running on Vercel, delegate to Vercel native Python Serverless function (/api/py_exec)
+  if (process.env.VERCEL || process.env.VERCEL_URL) {
+    const vercelPyRes = await executeViaVercelPython(code, inputData, timeoutMs);
+    if (vercelPyRes) {
+      return vercelPyRes;
+    }
   }
 
-  // 2. Setup isolated execution sandbox for native local runner
+  // 3. Setup isolated execution sandbox for native local runner
   const runId = `py_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const sandboxDir = path.join(os.tmpdir(), "pylearn_sandbox", runId);
 
@@ -165,8 +117,14 @@ export async function executePython(
     await fs.mkdir(sandboxDir, { recursive: true });
     const scriptPath = path.join(sandboxDir, "solution.py");
     await fs.writeFile(scriptPath, code, "utf-8");
-  } catch {
-    return executeWithPyodide(code, inputData, timeoutMs);
+  } catch (err: any) {
+    return {
+      stdout: "",
+      stderr: `Sandbox initialization error: ${err.message}`,
+      exitCode: 1,
+      executionMs: 0,
+      timedOut: false,
+    };
   }
 
   const pythonCmd = process.env.PYTHON_PATH || (process.platform === "win32" ? "python" : "python3");
@@ -188,9 +146,15 @@ export async function executePython(
           PYTHONDONTWRITEBYTECODE: "1",
         },
       });
-    } catch {
+    } catch (err: any) {
       fs.rm(sandboxDir, { recursive: true, force: true }).catch(() => {});
-      return resolve(executeWithPyodide(code, inputData, timeoutMs));
+      return resolve({
+        stdout: "",
+        stderr: `Execution error: ${err.message}`,
+        exitCode: 1,
+        executionMs: 0,
+        timedOut: false,
+      });
     }
 
     const timer = setTimeout(() => {
@@ -255,12 +219,6 @@ export async function executePython(
       try {
         await fs.rm(sandboxDir, { recursive: true, force: true });
       } catch {}
-
-      // If spawn returned ENOENT (e.g. python3 missing on Vercel), seamlessly fallback to Pyodide!
-      if (err.code === "ENOENT" || err.message?.includes("ENOENT")) {
-        const pyodideRes = await executeWithPyodide(code, inputData, timeoutMs);
-        return resolve(pyodideRes);
-      }
 
       resolve({
         stdout: stdoutData,
